@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET}
+      - ZHENZHEN_API_KEY=${ZHENZHEN_API_KEY}
+      - SILLYDREAM_API_KEY=${SILLYDREAM_API_KEY}
+    volumes:
+      - ./server/data:/app/server/data
+      - ./server/uploads:/app/server/uploads
+    restart: unless-stopped

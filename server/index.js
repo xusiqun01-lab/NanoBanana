@@ -10,7 +10,9 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
+
+// 安全警告：生产环境必须设置 JWT_SECRET 环境变量
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-for-dev-only';
 
 // 数据文件路径
 const DATA_DIR = path.join(__dirname, 'data');
@@ -55,9 +57,8 @@ function writeJSON(filePath, data) {
 // 中间件
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
-app.use(express.static(path.join(__dirname, '../dist')));
 
-// ===== 健康检查端点（必须放在最前面，确保最先可用）=====
+// ===== 关键：健康检查端点（必须放在所有其他路由之前）=====
 app.get('/api/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok', 
@@ -65,6 +66,14 @@ app.get('/api/health', (req, res) => {
     uptime: process.uptime()
   });
 });
+
+// 静态文件服务（前端 dist 文件夹）
+const distPath = path.join(__dirname, '../dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+} else {
+  console.warn('警告：未找到 dist 文件夹，前端可能未构建');
+}
 
 // 文件上传配置
 const storage = multer.diskStorage({
@@ -121,20 +130,17 @@ app.post('/api/auth/register', async (req, res) => {
     
     const users = readJSON(USERS_FILE);
     
-    // 检查邮箱是否已存在
     if (users.find(u => u.email === email)) {
       return res.status(400).json({ error: '该邮箱已被注册' });
     }
     
-    // 加密密码
     const hashedPassword = await bcrypt.hash(password, 10);
     
-    // 创建用户
     const newUser = {
       id: Date.now().toString(),
       email,
       password: hashedPassword,
-      role: users.length === 0 ? 'admin' : 'user', // 第一个用户为管理员
+      role: users.length === 0 ? 'admin' : 'user',
       createdAt: new Date().toISOString(),
       generationCount: 0
     };
@@ -142,7 +148,6 @@ app.post('/api/auth/register', async (req, res) => {
     users.push(newUser);
     writeJSON(USERS_FILE, users);
     
-    // 生成JWT
     const token = jwt.sign(
       { userId: newUser.id, email: newUser.email, role: newUser.role },
       JWT_SECRET,
@@ -212,7 +217,7 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
       id: user.id,
       email: user.email,
       role: user.role,
-      generationCount: user.generationCount
+      generationCount: user.generationCount || 0
     });
   } catch (error) {
     console.error('获取用户信息错误:', error);
@@ -222,7 +227,6 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
 
 // ===== 图像生成路由 =====
 
-// API配置
 const API_PROVIDERS = {
   zhenzhen: {
     baseURL: 'https://ai.t8star.cn/v1',
@@ -244,21 +248,11 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: '无效的API供应商' });
     }
     
-    // 构建消息内容
     let messageContent;
     
     if (mode === 'text2img') {
       messageContent = prompt;
-    } else if (mode === 'img2img' && referenceImages && referenceImages.length > 0) {
-      messageContent = [{ type: 'text', text: prompt }];
-      
-      for (const imgUrl of referenceImages) {
-        messageContent.push({
-          type: 'image_url',
-          image_url: { url: imgUrl }
-        });
-      }
-    } else if (mode === 'multiImg' && referenceImages && referenceImages.length > 0) {
+    } else if ((mode === 'img2img' || mode === 'multiImg') && referenceImages && referenceImages.length > 0) {
       messageContent = [{ type: 'text', text: prompt }];
       
       for (const imgUrl of referenceImages) {
@@ -271,7 +265,6 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: '无效的生成模式或缺少参考图片' });
     }
     
-    // 调用API
     const response = await axios.post(
       `${providerConfig.baseURL}/chat/completions`,
       {
@@ -287,7 +280,6 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
       }
     );
     
-    // 解析返回结果
     const content = response.data.choices[0]?.message?.content || '';
     
     let imageUrl = null;
@@ -388,7 +380,6 @@ app.get('/api/history', authMiddleware, (req, res) => {
 
 // ===== 管理员路由 =====
 
-// 获取所有用户
 app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const users = readJSON(USERS_FILE);
@@ -406,7 +397,6 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
-// 更新用户角色
 app.put('/api/admin/users/:id/role', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const { id } = req.params;
@@ -429,7 +419,6 @@ app.put('/api/admin/users/:id/role', authMiddleware, adminMiddleware, (req, res)
   }
 });
 
-// 删除用户
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const { id } = req.params;
@@ -438,7 +427,6 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
     const filteredUsers = users.filter(u => u.id !== id);
     writeJSON(USERS_FILE, filteredUsers);
     
-    // 同时删除该用户的生成记录
     const images = readJSON(IMAGES_FILE);
     const filteredImages = images.filter(img => img.userId !== id);
     writeJSON(IMAGES_FILE, filteredImages);
@@ -450,7 +438,6 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
   }
 });
 
-// 获取所有生成记录
 app.get('/api/admin/images', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const images = readJSON(IMAGES_FILE);
@@ -471,7 +458,6 @@ app.get('/api/admin/images', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
-// 获取统计数据
 app.get('/api/admin/stats', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const users = readJSON(USERS_FILE);
@@ -494,13 +480,24 @@ app.get('/api/admin/stats', authMiddleware, adminMiddleware, (req, res) => {
 
 // 前端路由处理（必须放在最后）
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../dist/index.html'));
+  const indexPath = path.join(__dirname, '../dist/index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(404).json({ error: '前端未构建，找不到 index.html' });
+  }
 });
 
-// 启动服务器
+// 全局错误处理
+app.use((err, req, res, next) => {
+  console.error('服务器错误:', err);
+  res.status(500).json({ error: '服务器内部错误' });
+});
+
 app.listen(PORT, () => {
-  console.log(`服务器运行在端口 ${PORT}`);
-  console.log(`健康检查: http://localhost:${PORT}/api/health`);
+  console.log(`✅ 服务器运行在端口 ${PORT}`);
+  console.log(`✅ 健康检查: http://localhost:${PORT}/api/health`);
+  console.log(`✅ 环境: ${process.env.NODE_ENV || 'development'}`);
 });
 
 module.exports = app;

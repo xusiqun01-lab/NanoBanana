@@ -9,13 +9,14 @@ const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
 // 数据文件路径
 const DATA_DIR = path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const IMAGES_FILE = path.join(DATA_DIR, 'images.json');
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
 
 // 确保数据目录存在
 if (!fs.existsSync(DATA_DIR)) {
@@ -38,12 +39,17 @@ function readJSON(filePath) {
     const data = fs.readFileSync(filePath, 'utf8');
     return JSON.parse(data);
   } catch (error) {
+    console.error(`读取文件错误 ${filePath}:`, error);
     return [];
   }
 }
 
 function writeJSON(filePath, data) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+  } catch (error) {
+    console.error(`写入文件错误 ${filePath}:`, error);
+  }
 }
 
 // 中间件
@@ -51,14 +57,22 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static(path.join(__dirname, '../dist')));
 
+// ===== 健康检查端点（必须放在最前面，确保最先可用）=====
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
 // 文件上传配置
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.join(__dirname, 'uploads');
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
+    if (!fs.existsSync(UPLOAD_DIR)) {
+      fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     }
-    cb(null, uploadDir);
+    cb(null, UPLOAD_DIR);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -188,17 +202,22 @@ app.post('/api/auth/login', async (req, res) => {
 
 // 获取当前用户信息
 app.get('/api/auth/me', authMiddleware, (req, res) => {
-  const users = readJSON(USERS_FILE);
-  const user = users.find(u => u.id === req.user.userId);
-  if (!user) {
-    return res.status(404).json({ error: '用户不存在' });
+  try {
+    const users = readJSON(USERS_FILE);
+    const user = users.find(u => u.id === req.user.userId);
+    if (!user) {
+      return res.status(404).json({ error: '用户不存在' });
+    }
+    res.json({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      generationCount: user.generationCount
+    });
+  } catch (error) {
+    console.error('获取用户信息错误:', error);
+    res.status(500).json({ error: '获取用户信息失败' });
   }
-  res.json({
-    id: user.id,
-    email: user.email,
-    role: user.role,
-    generationCount: user.generationCount
-  });
 });
 
 // ===== 图像生成路由 =====
@@ -229,15 +248,10 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
     let messageContent;
     
     if (mode === 'text2img') {
-      // 文生图
       messageContent = prompt;
     } else if (mode === 'img2img' && referenceImages && referenceImages.length > 0) {
-      // 图生图
-      messageContent = [
-        { type: 'text', text: prompt }
-      ];
+      messageContent = [{ type: 'text', text: prompt }];
       
-      // 添加参考图片
       for (const imgUrl of referenceImages) {
         messageContent.push({
           type: 'image_url',
@@ -245,10 +259,7 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
         });
       }
     } else if (mode === 'multiImg' && referenceImages && referenceImages.length > 0) {
-      // 多图参考
-      messageContent = [
-        { type: 'text', text: prompt }
-      ];
+      messageContent = [{ type: 'text', text: prompt }];
       
       for (const imgUrl of referenceImages) {
         messageContent.push({
@@ -279,7 +290,6 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
     // 解析返回结果
     const content = response.data.choices[0]?.message?.content || '';
     
-    // 提取图片URL或base64
     let imageUrl = null;
     let imageBase64 = null;
     
@@ -338,7 +348,7 @@ app.post('/api/generate', authMiddleware, async (req, res) => {
   }
 });
 
-// 上传图片（用于图生图）
+// 上传图片
 app.post('/api/upload', authMiddleware, upload.single('image'), (req, res) => {
   try {
     if (!req.file) {
@@ -378,7 +388,7 @@ app.get('/api/history', authMiddleware, (req, res) => {
 
 // ===== 管理员路由 =====
 
-// 获取所有用户（管理员）
+// 获取所有用户
 app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const users = readJSON(USERS_FILE);
@@ -396,7 +406,7 @@ app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
-// 更新用户角色（管理员）
+// 更新用户角色
 app.put('/api/admin/users/:id/role', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const { id } = req.params;
@@ -419,7 +429,7 @@ app.put('/api/admin/users/:id/role', authMiddleware, adminMiddleware, (req, res)
   }
 });
 
-// 删除用户（管理员）
+// 删除用户
 app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const { id } = req.params;
@@ -440,7 +450,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
   }
 });
 
-// 获取所有生成记录（管理员）
+// 获取所有生成记录
 app.get('/api/admin/images', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const images = readJSON(IMAGES_FILE);
@@ -461,7 +471,7 @@ app.get('/api/admin/images', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
-// 获取统计数据（管理员）
+// 获取统计数据
 app.get('/api/admin/stats', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const users = readJSON(USERS_FILE);
@@ -482,18 +492,15 @@ app.get('/api/admin/stats', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
-// 健康检查
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-// 前端路由处理
+// 前端路由处理（必须放在最后）
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
+// 启动服务器
 app.listen(PORT, () => {
   console.log(`服务器运行在端口 ${PORT}`);
+  console.log(`健康检查: http://localhost:${PORT}/api/health`);
 });
 
 module.exports = app;
